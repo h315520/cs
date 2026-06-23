@@ -626,9 +626,9 @@ body::after {
 const SELECTORS = {
   BASIC: { nick: '.gt21', avatar: '.gt1 img', infoDD: '.gz dl dd' },
   STATS: { matches: '.gjf1', faction: '.gjf2 .gjf21', modeTime: '.gjf3 .gjf31' },
-  TAB_TOTAL: { id: 'con_ri_4', combatDD: '.gr221 dd', honorDD: '.gr222.gai dd', extraDD: '.grr2.gai1 dd' },
-  // 月数据标签（同一页面内的月 tab）
-  TAB_MONTH: { id: 'con_yue_4', combatDD: '.gr221 dd', honorDD: '.gr222.gai dd', extraDD: '.grr2.gai1 dd' },
+  // 战斗容器：先取容器 div，再在内部 querySelectorAll('dd')
+  TAB_TOTAL: { id: 'con_ri_4', combatDiv: '.gr221', honorDiv: '.gr222.gai', extraDiv: '.grr2.gai1' },
+  TAB_MONTH: { id: 'con_ri_2', combatDiv: '.gr221', honorDiv: '.gr222.gai', extraDiv: '.grr2.gai1' },
   MVP: { id: 'con_mvp_4' },
   WEAPONS: { id: 'con_wuqi_4' }
 };
@@ -640,18 +640,16 @@ const FALLBACK = {
 
 // 多个代理服务（按稳定性排序，均无需 API Key）
 const PROXIES = [
-  // 1. allorigins.win — 经典方案
+  // 1. allorigins.win — 实测可用
   { build: url => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url), type: 'raw' },
-  { build: url => 'https://api.allorigins.win/get?url=' + encodeURIComponent(url), type: 'json' },
-  // 2. everyorigin — 开源替代，无限制
-  { build: url => 'https://api.everyorigin.com/raw?url=' + encodeURIComponent(url), type: 'raw' },
-  // 3. cors.lol — 免费
-  { build: url => 'https://api.cors.lol/?url=' + encodeURIComponent(url), type: 'raw' },
-  // 4. cors.x2u.in — 轻量备用
-  { build: url => 'https://cors.x2u.in/?url=' + encodeURIComponent(url), type: 'raw' },
-  // 5. 额外尝试：不同格式
+  // 2. corsproxy.io — 广泛使用的备选
+  { build: url => 'https://corsproxy.io/?' + encodeURIComponent(url), type: 'raw' },
+  // 3. 带 GBK 编码参数的 allorigins
   { build: url => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url) + '&charset=GBK', type: 'raw' },
-  { build: url => 'https://api.everyorigin.com/get?url=' + encodeURIComponent(url), type: 'json' }
+  // 4. codeTabs CORS proxy
+  { build: url => 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(url), type: 'raw' },
+  // 5. allorigins /get JSON 格式
+  { build: url => 'https://api.allorigins.win/get?url=' + encodeURIComponent(url), type: 'json' },
 ];
 
 const WEAPON_NAMES = {
@@ -665,7 +663,10 @@ const WPN_ABBR = { 28:'AK',22:'M4',18:'AWP',26:'De',16:'USP',17:'G18',19:'MP5',7
 const WPN_CLS = { 28:'wpn-ak',22:'wpn-m4',18:'wpn-awp',26:'wpn-deagle',16:'wpn-usp',17:'wpn-glock',19:'wpn-mp5',7:'wpn-mp5',8:'wpn-smg',27:'wpn-ak',14:'wpn-ak',15:'wpn-m4',4:'wpn-shotgun',5:'wpn-shotgun',21:'wpn-shotgun',3:'wpn-sniper',24:'wpn-sniper',20:'wpn-mg',30:'wpn-smg',23:'wpn-smg',12:'wpn-smg',13:'wpn-sniper',1:'wpn-usp',10:'wpn-usp',11:'wpn-usp',29:'wpn-deagle',6:'wpn-smg',9:'wpn-ak' };
 
 const CACHE_TTL = 5 * 60 * 1000;
-const MONTH_TAB_IDS = ['con_yue_4', 'con_month_4', 'con_y_4'];
+// 页面选项卡：日(1) / 月(2) / 年(3) / 总(4)
+const MONTH_TAB_IDS = ['con_ri_2'];
+const MONTH_WEAPONS_TAB = 'con_wuqi_2';
+const MONTH_MVP_TAB = 'con_mvp_2';
 
 // ==================== DOM ====================
 const $ = id => document.getElementById(id);
@@ -715,8 +716,15 @@ function setCached(id, data) {
 // ==================== 网络 ====================
 // 解码 HTML（支持 GBK 和 UTF-8）
 function decodeHtml(buf) {
-  try { return new TextDecoder('gbk').decode(buf); } catch(e) {}
-  try { return new TextDecoder('utf-8').decode(buf); } catch(e) {}
+  // 优先尝试 GBK（cscspt.com 使用的编码），然后 UTF-8
+  try { const r = new TextDecoder('gbk').decode(buf); if (r && r.length > 100) return r; } catch(e) {}
+  try { const r = new TextDecoder('gb18030').decode(buf); if (r && r.length > 100) return r; } catch(e) {}
+  try { const r = new TextDecoder('utf-8').decode(buf); if (r && r.length > 100) return r; } catch(e) {}
+  // 最后尝试从头部检测编码
+  try {
+    const r = new TextDecoder('gbk').decode(buf);
+    if (r && r.length > 10) return r;
+  } catch(e) {}
   return null;
 }
 
@@ -730,9 +738,9 @@ const FETCH_HEADERS = {
 // 获取 HTML（自动处理编码）
 async function fetchHtml(url) {
   const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), 15000);
+  const t = setTimeout(() => ctrl.abort(), 10000);
   try {
-    const res = await fetch(url, { signal: ctrl.signal, headers: FETCH_HEADERS });
+    const res = await fetch(url, { signal: ctrl.signal, headers: FETCH_HEADERS, credentials: 'omit' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const buf = await res.arrayBuffer();
     return decodeHtml(buf);
@@ -742,28 +750,33 @@ async function fetchHtml(url) {
 // 获取 JSON 格式的代理响应（用于 allorigins /get 等）
 async function fetchJsonProxy(proxyUrl) {
   const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), 15000);
+  const t = setTimeout(() => ctrl.abort(), 12000);
   try {
     const res = await fetch(proxyUrl, { signal: ctrl.signal, headers: FETCH_HEADERS });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) return null;
     const json = await res.json();
-    // allorigins /get 返回 { contents: "..." }
-    if (json && json.contents && typeof json.contents === 'string' && json.contents.length > 500) {
-      return json.contents;
+    // allorigins /get 可返回 { contents: "..." }
+    if (json && json.contents && typeof json.contents === 'string') {
+      if (json.contents.length > 80 && /<[a-z]+/i.test(json.contents)) return json.contents;
+      if (json.status && json.status.http_code === 200 && json.contents.length > 10) return json.contents;
     }
+    // everyorigin 等其他格式
+    if (json && typeof json.contents === 'string' && json.contents.length > 80) return json.contents;
     return null;
-  } finally { clearTimeout(t); }
+  } catch(e) { return null; }
+  finally { clearTimeout(t); }
 }
 
 async function fetchWithFallbacks(pageUrl) {
   // 1. 尝试直连（可能 CORS 失败）
   try {
     const h = await fetchHtml(pageUrl);
-    if (h && h.length > 500) return h;
+    if (h && h.length > 100) return h;
   } catch(e) {}
 
   // 2. 尝试所有代理
-  for (const proxy of PROXIES) {
+  for (let i = 0; i < PROXIES.length; i++) {
+    const proxy = PROXIES[i];
     try {
       const proxyUrl = proxy.build(pageUrl);
       let h;
@@ -772,28 +785,38 @@ async function fetchWithFallbacks(pageUrl) {
       } else {
         h = await fetchHtml(proxyUrl);
       }
-      if (h && h.length > 500) return h;
-    } catch(e) {}
+      if (h && h.length > 100) {
+        console.log('[CS] 代理 #' + (i+1) + ' 成功, 内容长度:', h.length);
+        return h;
+      }
+      console.log('[CS] 代理 #' + (i+1) + ' 返回内容过短:', h ? h.length : 0);
+    } catch(e) {
+      console.log('[CS] 代理 #' + (i+1) + ' 失败:', e.message);
+    }
   }
   return null;
 }
 
 async function fetchImageAsDataUrl(imageUrl) {
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), 10000);
-  // 使用第一个 raw 类型的代理
-  const firstRaw = PROXIES.find(p => p.type === 'raw') || PROXIES[0];
-  try {
-    const res = await fetch(firstRaw.build(imageUrl), { signal: ctrl.signal });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const blob = await res.blob();
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onloadend = () => resolve(reader.result);
-      reader.onerror = reject;
-      reader.readAsDataURL(blob);
-    });
-  } finally { clearTimeout(t); }
+  const rawProxies = PROXIES.filter(p => p.type === 'raw');
+  for (const proxy of rawProxies) {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 8000);
+    try {
+      const res = await fetch(proxy.build(imageUrl), { signal: ctrl.signal });
+      if (!res.ok) continue;
+      const blob = await res.blob();
+      if (blob.size < 100) continue;
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+    } catch(e) { continue; }
+    finally { clearTimeout(t); }
+  }
+  return null;
 }
 
 // ==================== 解析 ====================
@@ -852,15 +875,15 @@ function parseStats(doc) {
  * 从指定 tab 容器中解析战斗/荣誉数据
  * @param {Document} doc
  * @param {string} tabId - tab 容器 ID
- * @param {object} tabSelector - 选择器配置，含 combatDD, honorDD, extraDD
+ * @param {object} tabSelector - 选择器配置，含 combatDiv, honorDiv, extraDiv
  */
 function parseTabDataFrom(doc, tabId, tabSelector) {
   const data = {};
   const totalTab = doc.getElementById(tabId);
   if (!totalTab) return data;
 
-  // 战斗数据
-  const gr221 = totalTab.querySelector(tabSelector.combatDD);
+  // 战斗数据：先取容器 div，再查内部 dd
+  const gr221 = totalTab.querySelector(tabSelector.combatDiv);
   if (gr221) gr221.querySelectorAll('dd').forEach(dd => {
     const sp = dd.querySelector('span'), iv = dd.querySelector('i');
     if (!sp||!iv) return;
@@ -874,14 +897,14 @@ function parseTabDataFrom(doc, tabId, tabSelector) {
   });
 
   // 荣誉数据
-  const gr222 = totalTab.querySelector(tabSelector.honorDD);
+  const gr222 = totalTab.querySelector(tabSelector.honorDiv);
   if (gr222) {
     const lbs = ['mvpCount','c4Plant','c4Defuse','accidents'];
     gr222.querySelectorAll('dd').forEach((dd,i) => { if (lbs[i]) data[lbs[i]] = dd.textContent.trim(); });
   }
 
   // 额外数据
-  const grr2 = totalTab.querySelector(tabSelector.extraDD);
+  const grr2 = totalTab.querySelector(tabSelector.extraDiv);
   if (grr2) grr2.querySelectorAll('dd').forEach(dd => {
     const sp = dd.querySelector('span'), iv = dd.querySelector('i');
     if (!sp||!iv) return;
@@ -949,15 +972,49 @@ function parsePlayerData(html, id) {
   );
 }
 
+function parseMonthWeapons(doc) {
+  const weapons = [], wpTab = doc.getElementById(MONTH_WEAPONS_TAB);
+  if (!wpTab) return weapons;
+  wpTab.querySelectorAll('dl>dd').forEach(dd => {
+    const img = dd.querySelector('em img'), sp = dd.querySelector('span'), hsEl = dd.querySelector('i');
+    if (img&&sp&&hsEl) {
+      const src = img.getAttribute('src')||'', wpId = (src.match(/wpn_(\d+)/)||[])[1];
+      const kills = parseInt(sp.textContent.trim(),10)||0;
+      if (wpId&&kills>0) weapons.push({ id:parseInt(wpId,10), kills, hsRate:hsEl.textContent.trim(), icon:src });
+    }
+  });
+  weapons.sort((a,b)=>b.kills-a.kills);
+  return weapons;
+}
+
+function parseMonthMVP(doc) {
+  const data = {}, mvpTab = doc.getElementById(MONTH_MVP_TAB);
+  if (!mvpTab) return data;
+  mvpTab.querySelectorAll('dd').forEach(dd => {
+    const sp = dd.querySelector('span'), img = dd.querySelector('img');
+    if (sp&&img) {
+      const src = img.getAttribute('src')||'', v = sp.textContent.trim();
+      if (src.includes('031_03')) data.mvpGold=v;
+      else if (src.includes('031_06')) data.mvpSilver=v;
+      else if (src.includes('031_09')) data.mvpBronze=v;
+    }
+  });
+  return data;
+}
+
 function parsePlayerMonthData(html, id) {
   const doc = new DOMParser().parseFromString(html,'text/html');
+  const monthData = parseMonthTabData(doc);
+  if (!monthData.kills && !monthData.deaths) {
+    Object.assign(monthData, parseTabData(doc));
+  }
   return Object.assign(
     { id, nickname:'--' },
     parseBasicInfo(doc),
     parseStats(doc),
-    parseMonthTabData(doc),
-    parseMVP(doc),
-    { weapons: parseWeapons(doc) }
+    monthData,
+    parseMonthMVP(doc),
+    { weapons: parseMonthWeapons(doc) }
   );
 }
 
@@ -1377,7 +1434,7 @@ async function analyze() {
   const html = await fetchWithFallbacks(pageUrl);
   if (!html) {
     setLoading(false);
-    showStatus('error','<div class="err-icon">🌐❌</div>无法获取数据（已尝试 ' + PROXIES.length + ' 个代理服务）<br><small>👉 试试：用浏览器打开 cscspt.com 确认能访问，或用 <b>python -m http.server</b> 本地运行本 HTML 文件</small>');
+    showStatus('error','<div class="err-icon">🌐❌</div>无法获取数据（已尝试 ' + PROXIES.length + ' 个代理服务）<br><small>👉 试试：用 <b>node server.js</b> 启动本地代理服务器，然后访问 http://localhost:3000</small>');
     return;
   }
 
